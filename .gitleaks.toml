@@ -1,0 +1,3 @@
+[[allowlist.files]]
+description = "Allow test cert in config.yaml"
+path = "config.yaml"
