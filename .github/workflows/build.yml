@@ -39,7 +39,7 @@ jobs:
           containerfiles: |
             ./Containerfile
           extra-args: |
-            --secret id=username,src=secret-username \
+            --secret id=username,src=secret-username
             --secret id=password,src=secret-password
 
       - name: Cleanup secret files
