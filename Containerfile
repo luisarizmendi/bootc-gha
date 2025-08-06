@@ -1,8 +1,5 @@
 FROM registry.redhat.io/rhel9/rhel-bootc:9.6
 
-RUN ls /run/secrets/
-RUN cat /run/secrets/username
-
 # Subscribe
 RUN --mount=type=secret,id=username \
     --mount=type=secret,id=password \
