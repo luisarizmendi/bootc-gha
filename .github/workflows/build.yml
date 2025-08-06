@@ -2,7 +2,7 @@ name: Build bootc image with GHA
 
 on:
   schedule:
-    # Runs every Friday at midnight UTC (adjust as desired)
+    # Runs every Friday at midnight UTC (adjust if needed)
     - cron: "0 0 * * 5"
   workflow_dispatch: {}
   push:
@@ -22,7 +22,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Build image with Buildah
+      - name: Prepare Buildah template for secret injection
+        run: |
+          # Construct Buildah extra-args to mount username/password secrets
+          echo "username=${{ secrets.RH_USERNAME }}" > secret-username
+          echo "password=${{ secrets.RH_PASSWORD }}" > secret-password
+
+      - name: Build image with Buildah (with secrets)
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
@@ -32,6 +38,12 @@ jobs:
             ${{ github.sha }}
           containerfiles: |
             ./Containerfile
+          extra-args: |
+            --secret id=username,src=secret-username \
+            --secret id=password,src=secret-password
+
+      - name: Cleanup secret files
+        run: rm -f secret-username secret-password
 
       - name: Setup empty Docker config (podman-login workaround)
         run: |
