@@ -7,8 +7,8 @@ RUN --mount=type=secret,id=username \
     rm -rf /etc/rhsm-host && subscription-manager register \
       --username "$(cat /run/secrets/username)" \
       --password "$(cat /run/secrets/password)" | tee /tmp/register_output && \
-    grep -o 'ID: [a-f0‑9-]*' /tmp/register_output | cut -d' ' -f2 > /etc/rhsm/system_id && \
-    grep -o 'system name is: [a-f0‑9-]*' /tmp/register_output | cut -d' ' -f4 > /etc/rhsm/host_id && \
+    grep -o 'ID: [a-f0-9-]*' /tmp/register_output | cut -d' ' -f2 > /etc/rhsm/system_id && \
+    grep -o 'system name is: [a-f0-9-]*' /tmp/register_output | cut -d' ' -f4 > /etc/rhsm/host_id && \
     rm -f /tmp/register_output
 
 RUN dnf -y copr enable @redhat-et/flightctl && \
