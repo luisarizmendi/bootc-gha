@@ -28,6 +28,15 @@ jobs:
           username: ${{ secrets.RH_USERNAME }}
           password: ${{ secrets.RH_PASSWORD }}
       
+      - name: Prepare Buildah secrets for container subscription
+        run: |
+          # Create secret files for subscription-manager
+          echo "${{ secrets.RH_USERNAME }}" > secret-username
+          echo "${{ secrets.RH_PASSWORD }}" > secret-password
+          
+          # Set restrictive permissions on secret files
+          chmod 600 secret-username secret-password
+      
       - name: Build image with Buildah
         id: build
         uses: redhat-actions/buildah-build@v2
@@ -39,7 +48,12 @@ jobs:
           containerfiles: |
             ./Containerfile
           extra-args: |
+            --secret id=username,src=secret-username
+            --secret id=password,src=secret-password
             --pull=always
+      
+      - name: Cleanup secret files
+        run: rm -f secret-username secret-password
       
       - name: Setup empty Docker config (podman-login workaround)
         run: |
