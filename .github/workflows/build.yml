@@ -32,7 +32,6 @@ jobs:
             PLATFORMS="${{ github.event.inputs.platforms }}"
             FORMATS="${{ github.event.inputs.formats }}"
           else
-
             PLATFORMS="linux/amd64,linux/arm64"
             FORMATS="anaconda-iso,qcow2"
           fi
@@ -84,18 +83,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Subscribe runner to Red Hat
+        run: |
+          set -euo pipefail
+          echo "Subscribing runner to Red Hat..."
+          
+          # Register with Red Hat Subscription Manager
+          sudo subscription-manager register \
+            --username="${{ secrets.RH_USERNAME }}" \
+            --password="${{ secrets.RH_PASSWORD }}" \
+            --auto-attach
+          
+          # Enable necessary repositories
+          sudo subscription-manager repos --enable rhel-9-for-${{ matrix.arch }}-appstream-rpms
+          sudo subscription-manager repos --enable rhel-9-for-${{ matrix.arch }}-baseos-rpms
+          
+          echo "Runner successfully subscribed to Red Hat"
+
       - name: Log in to Red Hat Registry
         uses: redhat-actions/podman-login@v1
         with:
           registry: registry.redhat.io
           username: ${{ secrets.RH_USERNAME }}
           password: ${{ secrets.RH_PASSWORD }}
-
-      - name: Prepare Buildah secrets for container subscription
-        run: |
-          echo "${{ secrets.RH_USERNAME }}" > secret-username
-          echo "${{ secrets.RH_PASSWORD }}" > secret-password
-          chmod 600 secret-username secret-password
 
       - name: Build platform-specific image with Buildah
         id: build
@@ -109,12 +119,7 @@ jobs:
           containerfiles: |
             ./Containerfile
           extra-args: |
-            --secret id=username,src=secret-username
-            --secret id=password,src=secret-password
             --pull=always
-
-      - name: Cleanup secret files
-        run: rm -f secret-username secret-password
 
       - name: Setup empty Docker config
         run: |
@@ -135,6 +140,35 @@ jobs:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}
           registry: ${{ env.REGISTRY }}
+
+      - name: Unsubscribe runner from Red Hat
+        if: always()
+        run: |
+          set +e  # Don't fail the job if unsubscribe fails
+          echo "Unsubscribing runner from Red Hat..."
+          
+          # Get host ID for cloud inventory cleanup
+          HOST_ID=$(cat /etc/rhsm/host_id 2>/dev/null || echo "")
+          
+          if [ -n "$HOST_ID" ]; then
+            echo "Cleaning up Red Hat Cloud inventory for host: $HOST_ID"
+            # Clean up from Red Hat Cloud inventory
+            for uuid in $(curl -s -u "${{ secrets.RH_USERNAME }}:${{ secrets.RH_PASSWORD }}" \
+              "https://cloud.redhat.com/api/inventory/v1/hosts?fqdn=$HOST_ID" | \
+              grep -o '"id":"[^"]*' | grep -o '[^"]*$' || true); do
+              if [ -n "$uuid" ]; then
+                curl -s -u "${{ secrets.RH_USERNAME }}:${{ secrets.RH_PASSWORD }}" \
+                  -X DELETE "https://cloud.redhat.com/api/inventory/v1/hosts/$uuid" \
+                  -H "accept: */*" || true
+              fi
+            done
+          fi
+          
+          # Unregister from subscription manager
+          sudo subscription-manager unregister || true
+          sudo subscription-manager clean || true
+          
+          echo "Runner unsubscription completed"
 
   # Job: Create multi-platform manifest
   create-manifest:
@@ -218,6 +252,23 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Subscribe runner to Red Hat
+        run: |
+          set -euo pipefail
+          echo "Subscribing runner to Red Hat..."
+          
+          # Register with Red Hat Subscription Manager
+          sudo subscription-manager register \
+            --username="${{ secrets.RH_USERNAME }}" \
+            --password="${{ secrets.RH_PASSWORD }}" \
+            --auto-attach
+          
+          # Enable necessary repositories
+          sudo subscription-manager repos --enable rhel-9-for-${{ matrix.arch }}-appstream-rpms
+          sudo subscription-manager repos --enable rhel-9-for-${{ matrix.arch }}-baseos-rpms
+          
+          echo "Runner successfully subscribed to Red Hat"
 
       - name: Parse platform
         id: platform
@@ -368,6 +419,35 @@ jobs:
           name: bootc-artifacts-${{ steps.platform.outputs.safe_arch }}
           path: ./bootc-exports/
           retention-days: 7
+
+      - name: Unsubscribe runner from Red Hat
+        if: always()
+        run: |
+          set +e  # Don't fail the job if unsubscribe fails
+          echo "Unsubscribing runner from Red Hat..."
+          
+          # Get host ID for cloud inventory cleanup
+          HOST_ID=$(cat /etc/rhsm/host_id 2>/dev/null || echo "")
+          
+          if [ -n "$HOST_ID" ]; then
+            echo "Cleaning up Red Hat Cloud inventory for host: $HOST_ID"
+            # Clean up from Red Hat Cloud inventory
+            for uuid in $(curl -s -u "${{ secrets.RH_USERNAME }}:${{ secrets.RH_PASSWORD }}" \
+              "https://cloud.redhat.com/api/inventory/v1/hosts?fqdn=$HOST_ID" | \
+              grep -o '"id":"[^"]*' | grep -o '[^"]*$' || true); do
+              if [ -n "$uuid" ]; then
+                curl -s -u "${{ secrets.RH_USERNAME }}:${{ secrets.RH_PASSWORD }}" \
+                  -X DELETE "https://cloud.redhat.com/api/inventory/v1/hosts/$uuid" \
+                  -H "accept: */*" || true
+              fi
+            done
+          fi
+          
+          # Unregister from subscription manager
+          sudo subscription-manager unregister || true
+          sudo subscription-manager clean || true
+          
+          echo "Runner unsubscription completed"
 
   # Summary job
   summary:
