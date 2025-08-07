@@ -32,7 +32,11 @@ jobs:
             PLATFORMS="${{ github.event.inputs.platforms }}"
             FORMATS="${{ github.event.inputs.formats }}"
           else
-            PLATFORMS="linux/amd64,linux/arm64"
+
+            ###############################################
+            ###### ARM runners not for free Github accounts
+            #PLATFORMS="linux/amd64,linux/arm64"
+            PLATFORMS="linux/amd64
             FORMATS="anaconda-iso,qcow2"
           fi
           
