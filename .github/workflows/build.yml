@@ -113,11 +113,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # This will be populated by the generate-matrix job
           - platform: linux/amd64
             runner: ubuntu-latest
+            arch: amd64
           - platform: linux/arm64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm64
+            arch: arm64
     runs-on: ${{ matrix.runner }}
     env:
       REGISTRY: ghcr.io/${{ github.repository_owner }}
@@ -128,15 +129,15 @@ jobs:
       - name: Parse platform
         id: platform
         run: |
-          ARCH="${{ matrix.platform }}"
-          ARCH="${ARCH#linux/}"
-          echo "arch=$ARCH" >> $GITHUB_OUTPUT
-          echo "safe_arch=${ARCH//\//-}" >> $GITHUB_OUTPUT
+          echo "arch=${{ matrix.arch }}" >> $GITHUB_OUTPUT
+          echo "safe_arch=${{ matrix.arch }}" >> $GITHUB_OUTPUT
 
-      - name: Set up QEMU (for cross-platform builds)
+      - name: Set up QEMU (only for cross-platform builds if needed)
+        if: matrix.platform != 'linux/amd64' && matrix.runner == 'ubuntu-latest'
         uses: docker/setup-qemu-action@v3
 
-      - name: Enable binfmt_misc for cross-arch builds
+      - name: Enable binfmt_misc (only for emulated builds)
+        if: matrix.platform != 'linux/amd64' && matrix.runner == 'ubuntu-latest'
         run: |
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes || echo "binfmt setup completed"
 
