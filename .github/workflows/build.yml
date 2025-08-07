@@ -36,7 +36,7 @@ jobs:
             ###############################################
             ###### ARM runners not for free Github accounts
             #PLATFORMS="linux/amd64,linux/arm64"
-            PLATFORMS="linux/amd64
+            PLATFORMS="linux/amd64"
             FORMATS="anaconda-iso,qcow2"
           fi
           
