@@ -1,43 +1,72 @@
-name: Build bootc image with GHA
-
+name: Build bootc image with artifacts
 on:
-  #schedule:
-    # Runs every Friday at midnight UTC (adjust if needed)
-    #- cron: "0 0 * * 5"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to build (comma-separated)'
+        required: true
+        default: 'linux/amd64,linux/arm64'
+      formats:
+        description: 'Export formats (comma-separated)'
+        required: true
+        default: 'anaconda-iso,qcow2'
   push:
     branches:
       - main
 
 jobs:
-  build:
-    name: Build and push BootC image
+  # First job: Build the base bootc image
+  build-image:
+    name: Build BootC base image
     runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      tags: ${{ steps.build.outputs.tags }}
+      platforms: ${{ steps.setup.outputs.platforms }}
+      formats: ${{ steps.setup.outputs.formats }}
     env:
       IMAGE_NAME: bootc-example
       REGISTRY: ghcr.io/${{ github.repository_owner }}
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
+      - name: Setup build parameters
+        id: setup
+        run: |
+          # Set platforms (from input or default)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PLATFORMS="${{ github.event.inputs.platforms }}"
+            FORMATS="${{ github.event.inputs.formats }}"
+          else
+            PLATFORMS="linux/amd64,linux/arm64"
+            FORMATS="anaconda-iso,qcow2"
+          fi
+          echo "platforms=$PLATFORMS" >> $GITHUB_OUTPUT
+          echo "formats=$FORMATS" >> $GITHUB_OUTPUT
+          echo "Building for platforms: $PLATFORMS"
+          echo "Building formats: $FORMATS"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to Red Hat Registry
         uses: redhat-actions/podman-login@v1
         with:
           registry: registry.redhat.io
           username: ${{ secrets.RH_USERNAME }}
           password: ${{ secrets.RH_PASSWORD }}
-      
+
       - name: Prepare Buildah secrets for container subscription
         run: |
-          # Create secret files for subscription-manager
           echo "${{ secrets.RH_USERNAME }}" > secret-username
           echo "${{ secrets.RH_PASSWORD }}" > secret-password
-          
-          # Set restrictive permissions on secret files
           chmod 600 secret-username secret-password
-      
-      - name: Build image with Buildah
+
+      - name: Build multi-platform image with Buildah
         id: build
         uses: redhat-actions/buildah-build@v2
         with:
@@ -45,32 +74,215 @@ jobs:
           tags: |
             latest
             ${{ github.sha }}
+          platforms: ${{ steps.setup.outputs.platforms }}
           containerfiles: |
             ./Containerfile
           extra-args: |
             --secret id=username,src=secret-username
             --secret id=password,src=secret-password
             --pull=always
-      
+
       - name: Cleanup secret files
         run: rm -f secret-username secret-password
-      
-      - name: Setup empty Docker config (podman-login workaround)
+
+      - name: Setup empty Docker config
         run: |
           mkdir -p $HOME/.docker
           echo '{ "auths": {} }' > $HOME/.docker/config.json
-      
+
       - name: Log in to GitHub Container Registry
         uses: redhat-actions/podman-login@v1
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Push image to GHCR
+
+      - name: Push base image to GHCR
         id: push
         uses: redhat-actions/push-to-registry@v2
         with:
           image: ${{ steps.build.outputs.image }}
           tags: ${{ steps.build.outputs.tags }}
           registry: ${{ env.REGISTRY }}
+
+  # Matrix job: Build artifacts for each platform/format combination
+  build-artifacts:
+    name: Build artifacts
+    needs: build-image
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # This will be populated by the generate-matrix job
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    env:
+      REGISTRY: ghcr.io/${{ github.repository_owner }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Parse platform
+        id: platform
+        run: |
+          ARCH="${{ matrix.platform }}"
+          ARCH="${ARCH#linux/}"
+          echo "arch=$ARCH" >> $GITHUB_OUTPUT
+          echo "safe_arch=${ARCH//\//-}" >> $GITHUB_OUTPUT
+
+      - name: Set up QEMU (for cross-platform builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Enable binfmt_misc for cross-arch builds
+        run: |
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes || echo "binfmt setup completed"
+
+      - name: Log in to GitHub Container Registry
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create config.toml if it doesn't exist
+        run: |
+          if [ ! -f config.toml ]; then
+            cat > config.toml << 'EOF'
+          [[runner]]
+          name = "org.osbuild.rhel90"
+          label = "rhel-9.0-x86_64"
+          distro = "rhel-90"
+          EOF
+          fi
+
+      - name: Build artifacts for each format
+        run: |
+          set -euo pipefail
+          
+          IMAGE="${{ env.REGISTRY }}/${{ needs.build-image.outputs.image }}:${{ github.sha }}"
+          PLATFORM="${{ matrix.platform }}"
+          ARCH="${{ steps.platform.outputs.arch }}"
+          
+          # Parse formats from job output
+          IFS=',' read -ra FORMATS <<< "${{ needs.build-image.outputs.formats }}"
+          
+          # Create output directory
+          mkdir -p ./bootc-exports/$ARCH
+          
+          for FORMAT in "${FORMATS[@]}"; do
+            echo "Building $FORMAT for $PLATFORM"
+            
+            IMAGE_NAME_TAG=$(basename "$IMAGE")
+            SANITIZED_NAME_TAG=$(echo "$IMAGE_NAME_TAG" | sed 's/:/_/')
+            DIR_NAME=$(echo "$SANITIZED_NAME_TAG" | sed 's/[^A-Za-z0-9._-]/_/g')
+            DIR_NAME=${DIR_NAME}-${FORMAT}
+            
+            OUTPUT_DIR="./bootc-exports/$ARCH/$DIR_NAME"
+            mkdir -p "$OUTPUT_DIR"
+            
+            # Pull the image for the specific platform
+            podman pull --platform=$PLATFORM $IMAGE
+            
+            echo "Building $FORMAT artifact for $ARCH architecture"
+            
+            # Run bootc-image-builder
+            sudo podman run \
+              --platform=$PLATFORM \
+              --rm \
+              --privileged \
+              --pull=newer \
+              --security-opt label=type:unconfined_t \
+              -v ./config.toml:/config.toml:z \
+              -v "$PWD/$OUTPUT_DIR:/output" \
+              -v /var/lib/containers/storage:/var/lib/containers/storage \
+              registry.redhat.io/rhel9/bootc-image-builder:latest \
+              --target-arch $ARCH \
+              --type $FORMAT \
+              --use-librepo=True \
+              $IMAGE
+            
+            echo "Artifact built successfully in $OUTPUT_DIR"
+            ls -la "$OUTPUT_DIR"
+            
+            # Upload artifact to OCI registry
+            OCI_DISK_IMAGE_REPO=${IMAGE%%:*}/diskimage-${FORMAT}
+            OCI_IMAGE_TAG=${IMAGE##*:}-${ARCH}
+            
+            # Create manifest
+            sudo podman manifest create ${OCI_DISK_IMAGE_REPO}:${OCI_IMAGE_TAG} || true
+            
+            # Determine artifact type and file path
+            case "$FORMAT" in
+              "anaconda-iso")
+                ARTIFACT_TYPE="application/vnd.diskimage.iso"
+                FILE_PATH="$OUTPUT_DIR/bootiso/install.iso"
+                ;;
+              "qcow2")
+                ARTIFACT_TYPE="application/vnd.diskimage.qcow2"
+                FILE_PATH="$OUTPUT_DIR/qcow2/disk.qcow2"
+                ;;
+              "vmdk")
+                ARTIFACT_TYPE="application/vnd.diskimage.vmdk"
+                FILE_PATH="$OUTPUT_DIR/vmdk/disk.vmdk"
+                ;;
+              "raw")
+                ARTIFACT_TYPE="application/vnd.diskimage.raw"
+                FILE_PATH="$OUTPUT_DIR/image/disk.raw"
+                ;;
+              *)
+                echo "Unknown format: $FORMAT"
+                continue
+                ;;
+            esac
+            
+            # Check if file exists
+            if [ ! -f "$FILE_PATH" ]; then
+              echo "Error: Expected file not found at $FILE_PATH"
+              echo "Available files:"
+              find "$OUTPUT_DIR" -type f
+              continue
+            fi
+            
+            echo "Adding artifact to manifest"
+            sudo podman manifest add \
+              --artifact --artifact-type $ARTIFACT_TYPE \
+              --arch $ARCH --os=linux \
+              ${OCI_DISK_IMAGE_REPO}:${OCI_IMAGE_TAG} \
+              "$FILE_PATH"
+            
+            echo "Pushing manifest to registry"
+            sudo podman manifest push --all \
+              ${OCI_DISK_IMAGE_REPO}:${OCI_IMAGE_TAG} \
+              docker://${OCI_DISK_IMAGE_REPO}:${OCI_IMAGE_TAG}
+            
+            echo "Successfully pushed $FORMAT artifact for $ARCH"
+          done
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootc-artifacts-${{ steps.platform.outputs.safe_arch }}
+          path: ./bootc-exports/
+          retention-days: 7
+
+  # Summary job
+  summary:
+    name: Build Summary
+    needs: [build-image, build-artifacts]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Print build summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### Base Image" >> $GITHUB_STEP_SUMMARY
+          echo "- Image: ${{ needs.build-image.outputs.image }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Tags: ${{ needs.build-image.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Platforms: ${{ needs.build-image.outputs.platforms }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Formats: ${{ needs.build-image.outputs.formats }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Artifact Build Status" >> $GITHUB_STEP_SUMMARY
+          echo "- linux/amd64: ${{ needs.build-artifacts.result }}" >> $GITHUB_STEP_SUMMARY
