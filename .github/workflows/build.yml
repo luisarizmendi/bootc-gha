@@ -143,6 +143,9 @@ jobs:
     env:
       IMAGE_NAME: bootc-example
       REGISTRY: ghcr.io/${{ github.repository_owner }}
+    outputs:
+      manifest-latest: ${{ steps.create.outputs.manifest-latest }}
+      manifest-sha: ${{ steps.create.outputs.manifest-sha }}
     steps:
       - name: Log in to GitHub Container Registry
         uses: redhat-actions/podman-login@v1
@@ -152,28 +155,53 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create and push multi-platform manifest
+        id: create
         run: |
           set -euo pipefail
           
           IMAGE_BASE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          LATEST_MANIFEST="${IMAGE_BASE}:latest"
+          SHA_MANIFEST="${IMAGE_BASE}:${{ github.sha }}"
           
-          # Create manifests for latest and commit SHA
-          podman manifest create ${IMAGE_BASE}:latest
-          podman manifest create ${IMAGE_BASE}:${{ github.sha }}
+          echo "Creating multi-platform manifests..."
+          echo "Latest manifest: $LATEST_MANIFEST"
+          echo "SHA manifest: $SHA_MANIFEST"
+          
+          # Remove existing manifests if they exist
+          podman manifest rm "$LATEST_MANIFEST" 2>/dev/null || true
+          podman manifest rm "$SHA_MANIFEST" 2>/dev/null || true
+          
+          # Create new manifests
+          podman manifest create "$LATEST_MANIFEST"
+          podman manifest create "$SHA_MANIFEST"
           
           # Add platform-specific images to manifests
           IFS=',' read -ra PLATFORM_ARRAY <<< "${{ needs.setup.outputs.platforms }}"
           for PLATFORM in "${PLATFORM_ARRAY[@]}"; do
             ARCH="${PLATFORM#linux/}"
-            echo "Adding ${IMAGE_BASE}:latest-${ARCH} to manifest"
+            PLATFORM_LATEST="${IMAGE_BASE}:latest-${ARCH}"
+            PLATFORM_SHA="${IMAGE_BASE}:${{ github.sha }}-${ARCH}"
             
-            podman manifest add ${IMAGE_BASE}:latest ${IMAGE_BASE}:latest-${ARCH}
-            podman manifest add ${IMAGE_BASE}:${{ github.sha }} ${IMAGE_BASE}:${{ github.sha }}-${ARCH}
+            echo "Processing platform: $PLATFORM (arch: $ARCH)"
+            echo "  Adding $PLATFORM_LATEST to latest manifest"
+            echo "  Adding $PLATFORM_SHA to SHA manifest"
+            
+            # Add to manifests with proper architecture specification
+            podman manifest add --arch "$ARCH" --os "linux" "$LATEST_MANIFEST" "docker://$PLATFORM_LATEST"
+            podman manifest add --arch "$ARCH" --os "linux" "$SHA_MANIFEST" "docker://$PLATFORM_SHA"
           done
           
-          # Push manifests
-          podman manifest push --all ${IMAGE_BASE}:latest docker://${IMAGE_BASE}:latest
-          podman manifest push --all ${IMAGE_BASE}:${{ github.sha }} docker://${IMAGE_BASE}:${{ github.sha }}
+          echo "Inspecting created manifests..."
+          podman manifest inspect "$LATEST_MANIFEST"
+          podman manifest inspect "$SHA_MANIFEST"
+          
+          echo "Pushing multi-platform manifests..."
+          podman manifest push --all "$LATEST_MANIFEST" "docker://$LATEST_MANIFEST"
+          podman manifest push --all "$SHA_MANIFEST" "docker://$SHA_MANIFEST"
+          
+          echo "Multi-platform manifests created and pushed successfully!"
+          echo "manifest-latest=$LATEST_MANIFEST" >> $GITHUB_OUTPUT
+          echo "manifest-sha=$SHA_MANIFEST" >> $GITHUB_OUTPUT
 
   # Matrix job: Build artifacts for each platform/format combination
   build-artifacts:
@@ -227,9 +255,14 @@ jobs:
         run: |
           set -euo pipefail
           
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${{ matrix.arch }}"
+          # Use the multi-platform manifest image for artifact building
+          IMAGE="${{ needs.create-manifest.outputs.manifest-sha }}"
           PLATFORM="${{ matrix.platform }}"
           ARCH="${{ matrix.arch }}"
+          
+          echo "Building artifacts from multi-platform image: $IMAGE"
+          echo "Target platform: $PLATFORM"
+          echo "Target architecture: $ARCH"
           
           # Parse formats from job output
           IFS=',' read -ra FORMATS <<< "${{ needs.setup.outputs.formats }}"
@@ -248,7 +281,8 @@ jobs:
             OUTPUT_DIR="./bootc-exports/$ARCH/$DIR_NAME"
             mkdir -p "$OUTPUT_DIR"
             
-            # Pull the image for the specific platform
+            # Pull the multi-platform image and let podman select the right arch
+            echo "Pulling multi-platform image: $IMAGE"
             podman pull --platform=$PLATFORM $IMAGE
             
             echo "Building $FORMAT artifact for $ARCH architecture"
@@ -272,9 +306,10 @@ jobs:
             echo "Artifact built successfully in $OUTPUT_DIR"
             ls -la "$OUTPUT_DIR"
             
-            # Upload artifact to OCI registry
-            OCI_DISK_IMAGE_REPO=${IMAGE%%:*}/diskimage-${FORMAT}
-            OCI_IMAGE_TAG=${IMAGE##*:}-${ARCH}
+            # Upload artifact to OCI registry - use original image base for diskimage repo
+            IMAGE_BASE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+            OCI_DISK_IMAGE_REPO=${IMAGE_BASE}/diskimage-${FORMAT}
+            OCI_IMAGE_TAG=${{ github.sha }}-${ARCH}
             
             # Create manifest
             sudo podman manifest create ${OCI_DISK_IMAGE_REPO}:${OCI_IMAGE_TAG} || true
@@ -346,11 +381,18 @@ jobs:
       - name: Print build summary
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "### Base Images" >> $GITHUB_STEP_SUMMARY
-          echo "- Multi-platform Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
-          echo "- Commit Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "### Multi-platform Images" >> $GITHUB_STEP_SUMMARY
+          echo "- Latest: ${{ needs.create-manifest.outputs.manifest-latest }}" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA: ${{ needs.create-manifest.outputs.manifest-sha }}" >> $GITHUB_STEP_SUMMARY
           echo "- Platforms: ${{ needs.setup.outputs.platforms }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Formats: ${{ needs.setup.outputs.formats }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Artifact Formats: ${{ needs.setup.outputs.formats }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Platform-specific Images" >> $GITHUB_STEP_SUMMARY
+          IFS=',' read -ra PLATFORM_ARRAY <<< "${{ needs.setup.outputs.platforms }}"
+          for PLATFORM in "${PLATFORM_ARRAY[@]}"; do
+            ARCH="${PLATFORM#linux/}"
+            echo "- $ARCH: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}-${ARCH}" >> $GITHUB_STEP_SUMMARY
+          done
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Build Status" >> $GITHUB_STEP_SUMMARY
           echo "- Setup: ${{ needs.setup.result }}" >> $GITHUB_STEP_SUMMARY
