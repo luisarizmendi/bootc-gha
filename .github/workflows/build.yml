@@ -1,9 +1,9 @@
 name: Build bootc image with GHA
 
 on:
-  schedule:
+  #schedule:
     # Runs every Friday at midnight UTC (adjust if needed)
-    - cron: "0 0 * * 5"
+    #- cron: "0 0 * * 5"
   workflow_dispatch: {}
   push:
     branches:
