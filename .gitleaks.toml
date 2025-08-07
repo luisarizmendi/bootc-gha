@@ -1,3 +1,8 @@
-[[allowlist.files]]
-description = "Allow test cert in config.yaml"
-path = "config.yaml"
+
+
+[allowlist]
+  description = "Global Allowlist"
+  paths = [
+    '''config.yaml'''
+  ]
+
