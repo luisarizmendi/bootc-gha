@@ -33,10 +33,7 @@ jobs:
             FORMATS="${{ github.event.inputs.formats }}"
           else
 
-            ###############################################
-            ###### ARM runners not for free Github accounts
-            #PLATFORMS="linux/amd64,linux/arm64"
-            PLATFORMS="linux/amd64"
+            PLATFORMS="linux/amd64,linux/arm64"
             FORMATS="anaconda-iso,qcow2"
           fi
           
@@ -57,7 +54,7 @@ jobs:
             fi
             
             if [ "$ARCH" = "arm64" ]; then
-              RUNNER="ubuntu-24.04-arm64"
+              RUNNER="ubuntu-24.04-arm"
             else
               RUNNER="ubuntu-latest"
             fi
